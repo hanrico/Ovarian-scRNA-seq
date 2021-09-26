@@ -1,0 +1,261 @@
+---
+title: "Code for scRNA seq"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## The lines of code included herein are a compilation of script sourced from Wagner et al., 2020 (https://github.com/wagmag/SingleCellOvary/blob/master/Wagner20_Script_Unsorted.pdf) and additional optimization steps suggested by the Satija lab's training modules (https://satijalab.org/seurat/articles/pbmc3k_tutorial.html). 
+
+## Harvard Bioinformatics Core's (HBC) training website (https://bioinformatics.sph.harvard.edu/training#for-hsci-and-on-quad-hms-researchers) was referenced for the mathematical calculation of how many principal components to use in downstream analyses.
+
+# Load the Packages, run the function "sessionInfo" to keep track of version numbers
+```{r}
+library(Seurat)
+library(ggplot2)
+library(Matrix)
+library(dplyr)
+library(devtools)
+library(umap)
+library(ggplot2)
+library(reticulate)
+library(umap)
+library(patchwork)
+library(ggtree)
+sessionInfo()
+```
+# Create Seurat Objects
+```{r}
+## Setting the maximum size of global objects makes it less likely that your sample integration will fail. Setting your working directory reduces computation time. We recommend setting up a working directory containing one folder for each sample you plan to integrate. Within each sample's folder, add just the files from that sample's Cell Ranger output file titled "filtered_feature_bc_matrix". This should include three files: "barcodes.tsv", "features.tsv", and "matrix.mtx".
+
+options(future.globals.maxSize=2621440000)
+setwd("~/Documents/Documents - Hannah’s MacBook Pro/Hg38_v6")
+
+# Unsorted: Gender Reassignment Patient (GRP) sample
+GRP_data <-Read10X(data.dir="~/Documents/Documents - Hannah’s MacBook Pro/Hg38_v6/GRP_v6")
+GRP <-CreateSeuratObject(counts = GRP_data, min.cells= 3, min.features = 200, project = "Wagner_GRP") 
+GRP
+
+# Unsorted: C-section Patient (CSP) sample
+CSP_data <-Read10X(data.dir="~/Documents/Documents - Hannah’s MacBook Pro/Hg38_v6/CSEC_v6") 
+CSP <-CreateSeuratObject(counts = CSP_data, min.cells= 3, min.features = 200, project = "Wagner_CSP")
+CSP
+```
+# First QC- run on each sample separately to determine proper cutoffs for filtering
+```{r}
+GRP[["percent.mt"]]<- PercentageFeatureSet(GRP, pattern = "^MT-")
+CSP[["percent.mt"]]<- PercentageFeatureSet(CSP, pattern = "^MT-")
+
+# Visualize QC metrics as a violin plot
+PlotA <- VlnPlot(GRP, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+PlotA
+PlotB <- VlnPlot(CSP, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+PlotB
+```
+# FeatureScatter, we will use this function to identify mt. gene and feature cutoffs
+```{r}
+plotC <- FeatureScatter(GRP, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plotD <- FeatureScatter(GRP, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plotC + plotD
+
+plotE <- FeatureScatter(CSP, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plotF <- FeatureScatter(CSP, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plotE + plotF
+```
+# Filtering of sample: parameters determined from visual inspection of the output of the previous two chunks
+```{r}
+GRP[["percent.mt"]] <-PercentageFeatureSet(object = GRP, pattern = "^MT-")
+GRP <-subset(x = GRP, subset = nFeature_RNA>200&nFeature_RNA<5000&percent.mt<20)
+
+CSP[["percent.mt"]] <-PercentageFeatureSet(object = CSP, pattern = "^MT-")
+CSP <-subset(x = CSP, subset = nFeature_RNA>200&nFeature_RNA<5000&percent.mt<20)
+```
+# Normalization and Sample Integration
+```{r}
+GRP_unsorted <- NormalizeData(object = GRP, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+CSP_unsorted <- NormalizeData(object = CSP, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+GRP_unsorted <- FindVariableFeatures(object = GRP_unsorted, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+CSP_unsorted <- FindVariableFeatures(object = CSP_unsorted, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+reference.list <- c(GRP_unsorted, CSP_unsorted)
+Ovary.anchors <- FindIntegrationAnchors(object.list= reference.list, dims = 1:30)
+Ovary.integrated <- IntegrateData(anchorset = Ovary.anchors, dims = 1:30)
+```
+# Scale Data and Run PCA
+```{r}
+# Scale the data first before running PCA
+DefaultAssay(object = Ovary.integrated) <- "integrated"
+Ovary.integrated <- ScaleData(object = Ovary.integrated, verbose = FALSE)
+
+## Run PCA with 30 PCs first (depending on the expected dimensionality of your dataset), and then search the resulting gene lists for genes of interest. This will help to determine PCs to include in the downstream analysis. Ideally, do not exclude any PCs that have variable features (within the top 5-10 results) that are key markers for any cell types of interest. Mathematical calculations will also assist in selection of PCs for dimensionality reductions.
+Ovary.integrated <- RunPCA(object = Ovary.integrated, npcs = 30, verbose = FALSE)
+```
+# Examine and visualize PCA results
+```{r}
+# Visualize results, first using variable features
+print(Ovary.integrated[["pca"]], dims = 1:30, nfeatures = 5)
+
+# Check which genes heavily influence each PC
+Loading <- VizDimLoadings(Ovary.integrated, dims = 15:25, nfeatures = 15, reduction = "pca")
+Loading
+
+# Plot PCA 1 and 2 and then use heatmap to examine later PCs
+PCAPlot <- DimPlot(Ovary.integrated, reduction = "pca")
+PCAPlot
+Heatmap <- DimHeatmap(Ovary.integrated, dims = 15:20, cells = 500, balanced = TRUE)
+Heatmap
+
+# Elbow Plot- use this to look for a leveling off point where adding additional PCs won't add any additional information
+Elbow <- ElbowPlot(Ovary.integrated, ndims = 30, reduction = "pca")
+Elbow
+# Based on  inspection of these visualizations, roughly 18-20 PCs seems reasonable for our dataset, but we will verify this numerically.
+```
+# Calculating variation to find an appropriate # of PCs for downstream analysis. The results of these calculations will help verify the results of the PC determinations made using the output of the previous chunk
+```{r}
+# Determine percent of variation associated with each PC
+Ovary.calc <- Ovary.integrated[["pca"]]@stdev / sum(Ovary.integrated[["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(Ovary.calc)
+
+# Determine which PC exhibits cumulative % greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & Ovary.calc < 5)[1]
+co1
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((Ovary.calc[1:length(Ovary.calc) - 1] - Ovary.calc[2:length(Ovary.calc)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+
+# Minimum of the two calculations should be used for dimensionality reduction.
+pcs <- min(co1, co2)
+
+pcs
+
+plot_df <- data.frame(Ovary.calc = Ovary.calc, 
+           cumu = cumu, 
+           rank = 1:length(Ovary.calc))
+
+# Elbow plot to visualize 
+  ggplot(plot_df, aes(cumu, Ovary.calc, label = rank, color = rank > pcs)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(Ovary.calc[Ovary.calc > 5]), color = "grey") +
+  theme_bw()
+```
+# Cluster the cells and produce a UMAP
+```{r}
+# Be sure to use the # of PCs calculated above in these functions. Resolution can be adjusted incrementally by inspection of the UMAP and marker gene lists (produced later in this script). If many clusters appear to contain multiple cell types, consider increasing the resolution.
+Ovary.integrated <- FindNeighbors(object = Ovary.integrated, dims = 1:18)
+Ovary.integrated <- FindClusters(Ovary.integrated, resolution = 0.1)
+
+# Run UMAP
+Ovary.integrated <- RunUMAP(Ovary.integrated, dims = 1:18)
+DimPlot(Ovary.integrated, reduction = "umap")
+```
+# Visualize the UMAP by original sample identity of the cells
+```{r}
+DimPlot(Ovary.integrated, reduction = "umap", group.by = "orig.ident")
+```
+# Cluster identification and analysis
+```{r}
+## We can use the marker genes detailed by Wagner et al., 2020 in order to identify six of the clusters
+
+DefaultAssay(object = Ovary.integrated) <- "RNA"
+
+# Violin Plots
+
+## Stromal cells
+stroma <- c("DCN", "PDGFRA", "APOE", "FHL2")
+stroma_percent <- colSums(Ovary.integrated@assays$RNA@counts[stroma,])/colSums(Ovary.integrated@assays$RNA@counts)
+Ovary.integrated <- AddMetaData(object = Ovary.integrated, metadata = stroma_percent , col.name = "stroma_percent")
+stroma <- VlnPlot(Ovary.integrated, features = c("stroma_percent"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+stroma
+
+## Perivascular cells
+pv <- c("RGS5", "MCAM", "RERGL", "TAGLN", "MYH11")
+pv_percent <- colSums(Ovary.integrated@assays$RNA@counts[pv,])/colSums(Ovary.integrated@assays$RNA@counts)
+Ovary.integrated <- AddMetaData(object = Ovary.integrated, metadata = pv_percent , col.name = "pv_percent")
+pv <- VlnPlot(Ovary.integrated, features = c("pv_percent"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+pv
+
+## Endothelial cells
+endo <- c("CD34", "VWF", "FLI1", "CDH5") 
+endo_percent <- colSums(Ovary.integrated@assays$RNA@counts[endo,])/colSums(Ovary.integrated@assays$RNA@counts)
+Ovary.integrated <- AddMetaData(object = Ovary.integrated, metadata = endo_percent , col.name = "endo_percent")
+endo <- VlnPlot(Ovary.integrated, features = c("endo_percent"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+endo
+ 
+## Granulosa cells
+gran <- c("AMH", "FST", "FOXL2", "BEX1")
+gran_percent <- colSums(Ovary.integrated@assays$RNA@counts[gran,])/colSums(Ovary.integrated@assays$RNA@counts)
+Ovary.integrated <- AddMetaData(object = Ovary.integrated, metadata = gran_percent , col.name = "gran_percent")
+gran <- VlnPlot(Ovary.integrated, features = c("gran_percent"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+gran
+
+## Immune cells
+immune <- c("CD69", "ITGB2", "CXCR4", "CD14")
+immune_percent <- colSums(Ovary.integrated@assays$RNA@counts[immune,])/colSums(Ovary.integrated@assays$RNA@counts)
+Ovary.integrated <- AddMetaData(object = Ovary.integrated, metadata = immune_percent , col.name = "immune_percent")
+immune <- VlnPlot(Ovary.integrated, features = c("immune_percent"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+immune
+
+##Oocytes
+oo <- c("GDF9", "ZP3", "OOSP2", "FIGLA")
+oo_percent <- colSums(Ovary.integrated@assays$RNA@counts[oo,])/colSums(Ovary.integrated@assays$RNA@counts)
+Ovary.integrated <- AddMetaData(object = Ovary.integrated, metadata = oo_percent , col.name = "oo_percent")
+oo <- VlnPlot(Ovary.integrated, features = c("oo_percent"), cols = c("#FB61D7", "#A58AFF", "#00B6EB", "#53B400", "#C49A00", "grey"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+oocyte <- VlnPlot(Ovary.integrated, features = c("oo_percent"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+oocyte
+```
+# Reassign cluster names
+```{r}
+## The volcano plots generated above will help to determine which clusters are highly associated with a particular marker gene set (and thus, likely to consist of that cell type). For our purposes, further classification of cell subtypes was not necessary, but could easily be completed using marker gene lists.
+
+# Reassign cluster IDs and visualize the new labels on the UMAP
+UMAP_renamed_clusters <- RenameIdents(object = Ovary.integrated, '0' = 'stromal cell', '1' = 'stromal cell 2', '2' = 'perivascular cell', '3' = 'endothelial cell', '4' = 'granulosa cell', '5' = 'immune cell', '6'='endothelial cell 2', '7' = 'immune cell 2', '8' = 'germ cell/oocyte')
+
+DimPlot(UMAP_renamed_clusters, reduction = 'umap', group.by = 'ident')
+```
+# Table of cells per cluster, including separation of which sample group they were derived from
+```{r}
+table(Idents(object = Ovary.integrated),Ovary.integrated@meta.data$orig.ident)
+```
+# Counting OSCs using the marker genes from Wagner et al., 2020
+```{r}
+# Oocyte gene expression score is for GDF9, ZP3, OOSP2, FIGLA
+
+# OSC gene expression score is for DDX4, DPPA3, and PRDM1
+
+OSC <- c('DDX4', 'PRDM1', 'DPPA3')
+OSC_1 <- colSums(Ovary.integrated@assays$RNA@counts[OSC,])/colSums(Ovary.integrated@assays$RNA@counts)
+OSC_percent <- OSC_1 * 100
+Ovary.integrated <- AddMetaData(object = Ovary.integrated, metadata = OSC_percent , col.name = "OSC_percent")
+OSC <- VlnPlot(Ovary.integrated, features = c("oo_percent"), cols = c("#FB61D7", "#A58AFF", "#00B6EB", "#53B400", "#C49A00", "grey"), pt.size=0.05) + NoLegend() + stat_summary(fun = median, geom='point', size = 20, colour = "black", shape = 95 ) 
+
+DefaultAssay(object = Ovary.integrated) <- "integrated"
+
+oocyte_subset <- subset(Ovary.integrated, idents = '8')
+
+f <- FeatureScatter(oocyte_subset, feature1= ("OSC_percent"), feature2=("oo_percent"), pt.size = 2)
+e <- f + labs( title = "",
+               x = "OSC gene expression score",  
+               y = "Oocyte gene expression score")+ NoLegend()
+e
+```
+# Cluster dendrogram
+```{r}
+DefaultAssay(object = UMAP_renamed_clusters) <- "integrated"
+UMAP_renamed_clusters <- BuildClusterTree(object = UMAP_renamed_clusters)
+PlotClusterTree(UMAP_renamed_clusters)
+```
+# Find markers for every cluster compared to all remaining cells, report only the positive ones
+```{r}
+DefaultAssay(object = Ovary.integrated) <- "RNA"
+Ovary.integrated <- FindAllMarkers(Ovary.integrated, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+print(Ovary.integrated)
+# Verify that all clusters have marker genes at this resolution; in this case they do
+x <- Ovary.integrated %>% group_by(cluster) %>% top_n(n = 5)
+x
+```
